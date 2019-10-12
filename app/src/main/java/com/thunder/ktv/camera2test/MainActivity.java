@@ -4,6 +4,11 @@ import android.Manifest;
 import android.annotation.SuppressLint;
 import android.content.Context;
 import android.content.pm.PackageManager;
+import android.graphics.Bitmap;
+import android.graphics.BitmapFactory;
+import android.graphics.Canvas;
+import android.graphics.ImageFormat;
+import android.graphics.Rect;
 import android.graphics.SurfaceTexture;
 import android.hardware.camera2.CameraAccessException;
 import android.hardware.camera2.CameraCaptureSession;
@@ -12,6 +17,8 @@ import android.hardware.camera2.CameraDevice;
 import android.hardware.camera2.CameraManager;
 import android.hardware.camera2.CaptureRequest;
 import android.hardware.camera2.params.StreamConfigurationMap;
+import android.media.Image;
+import android.media.ImageReader;
 import android.os.Handler;
 import android.os.HandlerThread;
 import android.support.annotation.NonNull;
@@ -20,11 +27,15 @@ import android.support.v4.content.ContextCompat;
 import android.support.v7.app.AppCompatActivity;
 import android.os.Bundle;
 import android.util.Log;
+import android.util.Range;
 import android.view.Surface;
+import android.view.SurfaceView;
 import android.view.TextureView;
 import android.view.View;
+import android.widget.ImageView;
 import android.widget.Toast;
 
+import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
@@ -36,6 +47,8 @@ public class MainActivity extends AppCompatActivity {
     TextureView cameraPreview;
     Surface previewSurface;
     CameraDevice cameraDevice;
+    ImageReader imageReader;
+    SurfaceView surfaceView;
 
     /**
      * Starts a background thread and its {@link Handler}.
@@ -47,6 +60,7 @@ public class MainActivity extends AppCompatActivity {
         mBackgroundThread.start();
         mBackgroundHandler = new Handler(mBackgroundThread.getLooper());
     }
+    Range<Integer>[] fpsRanges;
 
     @SuppressLint("MissingPermission")
     @Override
@@ -56,6 +70,7 @@ public class MainActivity extends AppCompatActivity {
         requestPermissions();
         initView();
         startBackgroundThread();
+
         cameraManager = (CameraManager) getSystemService(Context.CAMERA_SERVICE);
         try {
             //遍历所有摄像头
@@ -66,7 +81,8 @@ public class MainActivity extends AppCompatActivity {
                 Log.d(TAG, "onCreate: StreamConfigurationMap " + map);
                 Log.d(TAG, "onCreate: getOutputSizes TextureView " + Arrays.toString(map.getOutputSizes(SurfaceTexture.class)));
                 Log.d(TAG, "onCreate: INFO_SUPPORTED_HARDWARE_LEVEL " + characteristics.get(CameraCharacteristics.INFO_SUPPORTED_HARDWARE_LEVEL));
-
+                fpsRanges = characteristics.get(CameraCharacteristics.CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES);
+                Log.d("FPS", "SYNC_MAX_LATENCY_PER_FRAME_CONTROL: " + Arrays.toString(fpsRanges));
                 cameraManager.openCamera(cameraId, new CameraDevice.StateCallback() {
                     @Override
                     public void onOpened(@NonNull CameraDevice camera) {
@@ -94,21 +110,62 @@ public class MainActivity extends AppCompatActivity {
             e.printStackTrace();
         }
     }
+    private int draw2Surface(Image image ,Surface surface) {
+        if (image == null)
+            return -1;
+        if (surface == null)
+            return -2;
+        ByteBuffer byteBuffer = image.getPlanes()[0].getBuffer();
+        byte[] buffer = new byte[byteBuffer.limit()];
+        byteBuffer.get(buffer);
+        final Bitmap bitmap = BitmapFactory.decodeByteArray(buffer,0,buffer.length);
+        Canvas canvas = surface.lockCanvas(new Rect());
+        int w = canvas.getWidth();
+        int h = canvas.getHeight();
+        canvas.drawARGB(0,0,0,0);
+        canvas.drawBitmap(bitmap,
+                new Rect(0, 0, image.getWidth(), image.getHeight()),
+                new Rect(0, 0, w, h),
+                null);
+        surface.unlockCanvasAndPost(canvas);
+        return 0;
+    }
     CaptureRequest captureRequest;
     void initView()
     {
         cameraPreview = findViewById(R.id.texture_view);
+        surfaceView = findViewById(R.id.surface_view);
         cameraPreview.setVisibility(View.GONE);
         cameraPreview.setSurfaceTextureListener(new TextureView.SurfaceTextureListener() {
             @Override
             public void onSurfaceTextureAvailable(SurfaceTexture surface, int width, int height) {
                 Log.d(TAG, "onSurfaceTextureAvailable: wh " + width + "x" + height);
                 surface.setDefaultBufferSize(width,height);
+                imageReader = ImageReader.newInstance(width,height, ImageFormat.JPEG,10);
+
+                imageReader.setOnImageAvailableListener(new ImageReader.OnImageAvailableListener() {
+                    @Override
+                    public void onImageAvailable(ImageReader reader) {
+                        Image image = reader.acquireNextImage();
+                        if(image == null)
+                            return;
+                        Log.d(TAG, "onImageAvailable: " + image.getFormat());
+//                        draw2Surface(image,surfaceView.getHolder().getSurface());
+                        image.close();
+                    }
+                },mBackgroundHandler);
                 previewSurface = new Surface(surface);
                 try {
-                    cameraDevice.createCaptureSession(Collections.singletonList(previewSurface),new SessionStateCallback(),mBackgroundHandler);
+                    List<Surface> list = new ArrayList();
+                    list.add(previewSurface);
+                    list.add(imageReader.getSurface());
+                    list.add(surfaceView.getHolder().getSurface());
+                    cameraDevice.createCaptureSession(list,new SessionStateCallback(),mBackgroundHandler);
                     CaptureRequest.Builder builder = cameraDevice.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW);
                     builder.addTarget(previewSurface);
+                    builder.addTarget(imageReader.getSurface());
+                    builder.addTarget(surfaceView.getHolder().getSurface());
+                    builder.set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, fpsRanges[0]);
                     captureRequest = builder.build();
 
                 } catch (CameraAccessException e) {
